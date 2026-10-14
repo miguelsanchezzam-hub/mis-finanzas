@@ -372,62 +372,94 @@ function viewHoy(){
 var SHEET_ID='1J8YLok5m9cKO5-idlwoYobD860YBLjR81_GqryJdqvI';
 var SHEET_URL='https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/edit';
 var SYNC_KEY='registro-gastos-sync';
-var syncing=false, syncErr=null;
+var syncing=false, syncErr=null, syncAgain=false;
 function getCfg(){try{return JSON.parse(window.localStorage.getItem(SYNC_KEY)||'{}')||{}}catch(e){return {}}}
 function setCfg(c){try{window.localStorage.setItem(SYNC_KEY,JSON.stringify(c))}catch(e){}}
+var inFlight={};
+function pendingDel(){return Array.isArray(data.pendingDel)?data.pendingDel:(data.pendingDel=[])}
 function pendingTx(){return data.tx.filter(function(t){return t.synced!==true}).sort(function(a,b){return (a.created||0)-(b.created||0)})}
+function pendingCount(){return pendingTx().length+pendingDel().length}
 function safeText(s){s=String(s||'').replace(/[\t\r\n]+/g,' ');return /^[=+\-@]/.test(s)?"'"+s:s}
 function tsvOf(list){
   return list.map(function(t){return [t.date,t.type,t.cat,safeText(t.note),t.amount].join('\t')}).join('\n');
 }
 function errText(e){
   var c=e&&e.code;
-  if(c==='offline') return 'Sin internet. Se enviarán solos cuando vuelva la conexión.';
+  if(c==='offline') return 'Sin internet. Se sincronizará solo cuando vuelva la conexión.';
   if(c==='token') return 'El código secreto no coincide con el del script. Revísalo en Ajustes.';
-  return 'No se pudo enviar a la Sheet ['+(c||'error')+']. Se reintentará; también puedes tocar Enviar ahora.';
+  return 'No se pudo sincronizar con la Sheet ['+(c||'error')+']. Se reintentará; también puedes tocar Sincronizar.';
 }
+function validTx(v){return v&&typeof v.id==='string'&&typeof v.amount==='number'&&typeof v.date==='string'&&typeof v.cat==='string'&&['gasto','ingreso','ahorro'].indexOf(v.type)>-1}
 async function syncPending(manual){
   var cfg=getCfg();
   if(!cfg.url||!cfg.token){updateChip();if(manual)toast('Primero conecta la Sheet en Ajustes');return}
-  if(syncing) return;
-  var list=pendingTx();
-  if(!list.length){syncErr=null;updateChip();if(manual)toast('Todo está en tu Google Sheet');return}
-  if(navigator.onLine===false){syncErr={code:'offline'};if(view==='hoy')render();else updateChip();return}
+  if(syncing){syncAgain=true;return}
+  if(navigator.onLine===false){syncErr={code:'offline'};if(view==='hoy')render();else updateChip();if(manual)toast('Sin internet');return}
   syncing=true; syncErr=null; updateChip();
+  var again=false;
   try{
-    for(var i=0;i<list.length;i+=25){
-      var batch=list.slice(i,i+25);
-      var res=await fetch(cfg.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body:JSON.stringify({token:cfg.token,rows:batch.map(function(t){return {id:t.id,date:t.date,type:t.type,cat:t.cat,note:t.note||'',amount:t.amount}})})});
-      var j=await res.json();
-      if(!j||!j.ok) throw {code:(j&&j.error)||'error'};
-      batch.forEach(function(t){t.synced=true}); persist();
+    var rows=pendingTx().slice(0,200), dels=pendingDel().slice();
+    inFlight={}; rows.forEach(function(t){inFlight[t.id]=1});
+    var payload={token:cfg.token,rows:rows.map(function(t){return {id:t.id,date:t.date,type:t.type,cat:t.cat,note:t.note||'',amount:t.amount}}),deletes:dels,
+      settings:data.settingsTs?{ts:data.settingsTs,value:data.settings}:null};
+    var res=await fetch(cfg.url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+    var j=await res.json();
+    if(!j||!j.ok) throw {code:(j&&j.error)||'error'};
+    if(!Array.isArray(j.items)) throw {code:'version'};
+    var server={}; j.items.forEach(function(it){if(validTx(it))server[it.id]=it});
+    data.pendingDel=pendingDel().filter(function(id){return dels.indexOf(id)<0});
+    var skip={}; pendingDel().forEach(function(id){skip[id]=1});
+    var keep=[];
+    data.tx.forEach(function(t){
+      var s=server[t.id];
+      if(s){t.synced=true;t.seen=true;if(s.cat!==t.cat)t.cat=s.cat;keep.push(t);return}
+      if(t.synced===true&&t.seen===true&&!inFlight[t.id]){return} /* borrado en otro dispositivo */
+      if(t.synced===true&&t.seen!==true){t.synced=false;again=true}  /* nunca visto en la Sheet: reenviar */
+      keep.push(t);
+    });
+    var have={};keep.forEach(function(t){have[t.id]=1});
+    Object.keys(server).forEach(function(id){
+      if(have[id]||skip[id]) return;
+      var s=server[id];
+      keep.push({id:s.id,date:s.date,type:s.type,cat:s.cat,note:s.note||'',amount:s.amount,created:+s.created||Date.now(),synced:true,seen:true});
+    });
+    data.tx=keep;
+    if(j.settings&&j.settings.value&&Number(j.settings.ts)>(+data.settingsTs||0)){
+      var sv=j.settings.value;
+      if(sv&&Array.isArray(sv.envelopes)&&Array.isArray(sv.debts)){data.settings=sv;data.settingsTs=Number(j.settings.ts)}
     }
-    if(manual) toast('Enviado a tu Google Sheet');
-  }catch(e){syncErr=(e&&e.code)?e:{code:'red'}}
-  finally{syncing=false; if(view==='hoy')render();else updateChip()}
+    inFlight={};
+    persist();
+    if(manual) toast('Sincronizado con tu Google Sheet');
+    if(pendingTx().length>0&&!again) again=rows.length>=200;
+  }catch(e){syncErr=(e&&e.code)?e:{code:'red'};inFlight={}}
+  finally{
+    syncing=false; var sa=syncAgain; syncAgain=false;
+    if(view==='hoy'||view==='stats'||view==='historial'||view==='sobres'||view==='deudas') render(); else updateChip();
+    if((again||sa)&&!syncErr) syncPending();
+  }
 }
 function updateChip(){
   var c=document.getElementById('sync-chip'); if(!c) return;
-  var n=pendingTx().length, cfg=getCfg(), cls='ok', txt='Sheet al día';
+  var n=pendingCount(), cfg=getCfg(), cls='ok', txt='Sincronizado';
   if(!cfg.url||!cfg.token){cls='pend';txt='Sheet sin conectar'}
-  else if(syncing){cls='busy';txt='Enviando…'}
-  else if(syncErr){cls='err';txt='Sin enviar ('+n+')'}
+  else if(syncing){cls='busy';txt='Sincronizando…'}
+  else if(syncErr){cls='err';txt='Sin sincronizar'+(n?' ('+n+')':'')}
   else if(n>0){cls='pend';txt='Por enviar ('+n+')'}
   c.className='sync-chip '+cls; c.textContent=txt;
 }
 function sheetCard(){
-  var n=pendingTx().length, cfg=getCfg(), msg='';
-  if(!cfg.url||!cfg.token) msg='Conecta tu Google Sheet en Ajustes para que cada gasto se envíe solo.';
-  else if(syncing) msg='Enviando a tu Google Sheet…';
+  var n=pendingCount(), cfg=getCfg(), msg='';
+  if(!cfg.url||!cfg.token) msg='Conecta tu Google Sheet en Ajustes para sincronizar tus dispositivos.';
+  else if(syncing) msg='Sincronizando con tu Google Sheet…';
   else if(syncErr) msg=errText(syncErr);
   else if(n>0) msg=(n===1?'1 movimiento por enviar':n+' movimientos por enviar')+' a tu Google Sheet.';
-  else msg='Todo lo que registraste ya está en tu Google Sheet.';
+  else msg='Todo está al día con tu Google Sheet y tus otros dispositivos.';
   return '<div class="card" style="margin-top:14px"><b style="font-weight:600">Tu Google Sheet</b>'+
     '<p class="muted" style="margin:4px 0 14px;font-size:15px">'+esc(msg)+'</p>'+
     '<div style="display:flex;gap:10px;flex-wrap:wrap">'+
-    ((n>0&&cfg.url&&!syncing)?'<button class="btn small" data-sync-now="1">Enviar ahora</button>':'')+
-    (n>0?'<button class="btn ghost small" data-copy-pending="1">Copiar para pegar</button>':'')+
+    ((cfg.url&&!syncing)?'<button class="btn small" data-sync-now="1">Sincronizar</button>':'')+
+    
     '<a class="btn ghost small" href="'+SHEET_URL+'" target="_blank" rel="noopener" style="text-decoration:none">Abrir Google Sheet</a></div>'+
     '</div>';
 }
@@ -437,7 +469,6 @@ async function copyPending(all){
   var text=tsvOf(list), ok=false;
   try{await navigator.clipboard.writeText(text);ok=true}catch(e){ok=false}
   if(ok){
-    if(!all){list.forEach(function(t){t.synced=true}); persist()}
     render(); toast('Copiados '+list.length+'. Pégalos en la pestaña Registro, columna A');
   }else{
     fillSettings(); openSheet(sheetS);
@@ -662,7 +693,7 @@ document.querySelectorAll('.tab').forEach(function(b){b.addEventListener('click'
 document.getElementById('view').addEventListener('click',function(e){
   var t;
   if((t=e.target.closest('[data-del]'))){
-    var id=t.dataset.del; var gone=data.tx.filter(function(x){return x.id===id})[0]; data.tx=data.tx.filter(function(x){return x.id!==id}); openRow=null; persist(); render(); toast(gone&&gone.synced?'Eliminado de la app. Sigue en tu Google Sheet; bórralo ahí también':'Movimiento eliminado'); return;
+    var id=t.dataset.del; var gone=data.tx.filter(function(x){return x.id===id})[0]; data.tx=data.tx.filter(function(x){return x.id!==id}); if(gone&&(gone.synced===true||inFlight[id])&&pendingDel().indexOf(id)<0) pendingDel().push(id); openRow=null; persist(); render(); toast('Movimiento eliminado'); syncPending(); return;
   }
   if((t=e.target.closest('[data-row]'))){openRow=openRow===t.dataset.row?null:t.dataset.row;render();return}
   if((t=e.target.closest('[data-week]'))){var n=weekOffset+ +t.dataset.week;if(n<=0){weekOffset=n;render()}return}
@@ -697,7 +728,7 @@ document.getElementById('btn-set-save').addEventListener('click',function(){
   S().debts.forEach(function(d,i){var a=parseAmount(document.getElementById('sd'+i).value),b=parseAmount(document.getElementById('sw'+i).value);if(isNaN(a)||a<0||isNaN(b)||b<0)ok=false;debts.push([a,b])});
   if(!ok){err.textContent='Revisa los montos: deben ser números de cero en adelante.';return}
   setCfg({url:document.getElementById('s-url').value.trim(),token:document.getElementById('s-token').value.trim()});
-  S().tope=tope;
+  S().tope=tope; data.settingsTs=Date.now();
   S().envelopes.forEach(function(e,i){e.weekly=envs[i]});
   S().debts.forEach(function(d,i){d.start=debts[i][0];d.weekly=debts[i][1]});
   persist(); closeSheets(); render(); toast('Ajustes guardados'); syncPending();
@@ -733,7 +764,7 @@ document.getElementById('btn-restore-go').addEventListener('click',function(){
   try{
     var d=JSON.parse(document.getElementById('backup-box').value);
     if(!d||!Array.isArray(d.tx)||!d.settings||!Array.isArray(d.settings.envelopes)||!Array.isArray(d.settings.debts)) throw new Error('bad');
-    d.tx=d.tx.filter(function(t){return t&&typeof t.amount==='number'&&typeof t.date==='string'&&typeof t.cat==='string'&&['gasto','ingreso','ahorro'].indexOf(t.type)>-1}).map(function(t){return {id:String(t.id||uid()),date:t.date,type:t.type,cat:t.cat,note:String(t.note||''),amount:t.amount,created:+t.created||Date.now(),synced:t.synced===true}});
+    d.tx=d.tx.filter(function(t){return t&&typeof t.amount==='number'&&typeof t.date==='string'&&typeof t.cat==='string'&&['gasto','ingreso','ahorro'].indexOf(t.type)>-1}).map(function(t){return {id:String(t.id||uid()),date:t.date,type:t.type,cat:t.cat,note:String(t.note||''),amount:t.amount,created:+t.created||Date.now(),synced:t.synced===true,seen:t.seen===true}});
     data=d; persist(); closeSheets(); render(); toast('Respaldo restaurado');
   }catch(e){err.textContent='Ese texto no parece un respaldo válido. Cópialo completo, desde la primera llave hasta la última.'}
 });
@@ -750,13 +781,14 @@ document.getElementById('btn-test').addEventListener('click',async function(){
 var wipeArmed=false;
 document.getElementById('btn-wipe').addEventListener('click',function(){
   if(!wipeArmed){wipeArmed=true;this.textContent='Toca otra vez para borrar todo';return}
-  data.tx=[]; persist(); closeSheets(); render(); toast('Movimientos borrados');
+  data.tx.forEach(function(t){if(t.synced===true&&pendingDel().indexOf(t.id)<0)pendingDel().push(t.id)}); data.tx=[]; persist(); closeSheets(); render(); toast('Movimientos borrados'); syncPending();
 });
 
 renderNotice(); render();
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
 if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){navigator.serviceWorker.register('sw.js').catch(function(){})}
 window.addEventListener('online',function(){syncPending()});
+setInterval(function(){if(!document.hidden)syncPending()},60000);
 document.addEventListener('visibilitychange',function(){if(!document.hidden)syncPending()});
 syncPending();
 })();

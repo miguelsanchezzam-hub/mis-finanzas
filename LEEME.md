@@ -20,3 +20,9 @@ Ajustes → «Conexión con Google Sheet»: pega la URL `/exec` y el código sec
 
 ## 5. Pasar tus datos actuales
 En la app vieja: Ajustes → Copiar respaldo. En la nueva: Ajustes → Restaurar respaldo → pega → Restaurar ahora. (Los movimientos ya enviados a la Sheet no se duplican.)
+
+## Varios dispositivos
+Instala la app en cada dispositivo y en cada uno pega la misma URL y el mismo código en Ajustes. La app sincroniza al abrirla, cada minuto mientras está abierta, al registrar o borrar algo, y al tocar «Sincronizar». Los ajustes (sobres, deudas, tope) también se comparten; gana el último cambio.
+
+## Si ya tenías el script anterior
+Reemplaza el código por el nuevo `apps-script.gs`, guarda y publica una NUEVA VERSIÓN: Implementar > Administrar implementaciones > lápiz > Versión: Nueva versión > Implementar. La URL no cambia.
