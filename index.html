@@ -200,6 +200,23 @@ textarea.field{padding:12px 14px;min-height:90px;font-size:13px}
   <h2>Deudas</h2>
   <div class="set-grid three"><span class="muted" style="font-size:13px">Deuda</span><span class="muted" style="font-size:13px;text-align:right">Saldo inicial</span><span class="muted" style="font-size:13px;text-align:right">Pago semanal</span></div>
   <div class="set-grid three" id="s-debt" style="margin-top:6px"></div>
+  <h2>Agregar nuevo</h2>
+  <p class="muted" style="font-size:14px;margin-top:0">Crea categorías de gasto, sobres semanales o deudas propias.</p>
+  <div class="chips" id="add-kinds">
+    <button class="chip" data-addkind="cat" aria-pressed="false">+ Categoría</button>
+    <button class="chip" data-addkind="env" aria-pressed="false">+ Sobre</button>
+    <button class="chip" data-addkind="debt" aria-pressed="false">+ Deuda</button>
+  </div>
+  <div id="add-panel" style="display:none;margin-top:12px">
+    <div class="label" style="margin-top:0" id="add-name-label">Nombre</div>
+    <input class="field" id="add-name" maxlength="40" autocomplete="off">
+    <div id="add-f-env" style="display:none"><div class="label">Sobre al que pertenece</div><select class="field" id="add-env"></select></div>
+    <div id="add-f-start" style="display:none"><div class="label">Saldo inicial de la deuda ($)</div><input class="field" id="add-start" inputmode="decimal" autocomplete="off"></div>
+    <div id="add-f-weekly" style="display:none"><div class="label" id="add-weekly-label">Monto semanal ($)</div><input class="field" id="add-weekly" inputmode="decimal" autocomplete="off"></div>
+    <p class="err" id="add-err" role="alert"></p>
+    <div style="display:flex;gap:10px"><button class="btn small" id="add-go">Agregar</button><button class="btn ghost small" id="add-cancel">Cancelar</button></div>
+  </div>
+  <div id="custom-list" style="margin-top:14px"></div>
   <h2>Conexión con Google Sheet</h2>
   <p class="muted" style="font-size:14px;margin-top:0">Pega la URL de tu script y el código secreto (ver instrucciones en LEEME).</p>
   <div class="label" style="margin-top:8px">URL del script</div>
@@ -265,6 +282,7 @@ function load(){
   if(!Array.isArray(d.tx)) d.tx=[];
   if(!d.settings) d.settings=clone(DEFAULTS);
   if(!Array.isArray(d.settings.debts)) d.settings.debts=clone(DEFAULTS.debts);
+  if(!Array.isArray(d.settings.customCats)) d.settings.customCats=[];
   DEFAULTS.debts.forEach(function(def){
     var has=d.settings.debts.some(function(x){return x.id===def.id});
     if(!has){
@@ -302,7 +320,9 @@ function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2
 function expenseCats(){
   var c=[];S().envelopes.forEach(function(e){e.cats.forEach(function(x){c.push(x)})});
   S().debts.forEach(function(d){c.push(d.cat)});
-  c.push('Mascotas');c.push('Otros gastos');return c;
+  c.push('Mascotas');
+  (S().customCats||[]).forEach(function(x){if(!x.env&&c.indexOf(x.name)<0)c.push(x.name)});
+  c.push('Otros gastos');return c;
 }
 function catsFor(type){return type==='ingreso'?INCOME_CATS:type==='ahorro'?SAVE_CATS:expenseCats()}
 function sum(list){return list.reduce(function(a,t){return a+t.amount},0)}
@@ -708,12 +728,118 @@ document.getElementById('view').addEventListener('click',function(e){
 });
 
 /* ---------- ajustes ---------- */
+/* ---------- agregar categorías, sobres y deudas ---------- */
+var addKind=null;
+function allNames(){
+  var n=[];
+  expenseCats().concat(INCOME_CATS,SAVE_CATS).forEach(function(x){n.push(x.toLowerCase())});
+  S().envelopes.forEach(function(e){n.push(e.name.toLowerCase())});
+  S().debts.forEach(function(d){n.push(d.name.toLowerCase());n.push(d.cat.toLowerCase())});
+  return n;
+}
+function usedCat(c){return data.tx.some(function(t){return t.cat===c})}
+function snapshotFields(){
+  try{
+    var v=parseAmount(document.getElementById('s-tope').value); if(!isNaN(v)&&v>=0) S().tope=v;
+    S().envelopes.forEach(function(e,i){var el=document.getElementById('se'+i);if(el){var x=parseAmount(el.value);if(!isNaN(x)&&x>=0)e.weekly=x}});
+    S().debts.forEach(function(d,i){var a=document.getElementById('sd'+i),b=document.getElementById('sw'+i);if(a&&b){var x=parseAmount(a.value),y=parseAmount(b.value);if(!isNaN(x)&&x>=0)d.start=x;if(!isNaN(y)&&y>=0)d.weekly=y}});
+  }catch(e){}
+}
+function openAddPanel(kind){
+  addKind=kind;
+  document.querySelectorAll('#add-kinds .chip').forEach(function(b){b.setAttribute('aria-pressed',b.dataset.addkind===kind?'true':'false')});
+  document.getElementById('add-panel').style.display='block';
+  document.getElementById('add-err').textContent='';
+  ['add-name','add-start','add-weekly'].forEach(function(id){document.getElementById(id).value=''});
+  document.getElementById('add-name-label').textContent=kind==='cat'?'Nombre de la categoría':kind==='env'?'Nombre del sobre':'Nombre de la deuda';
+  document.getElementById('add-f-env').style.display=kind==='cat'?'block':'none';
+  document.getElementById('add-f-start').style.display=kind==='debt'?'block':'none';
+  document.getElementById('add-f-weekly').style.display=(kind==='env'||kind==='debt')?'block':'none';
+  document.getElementById('add-weekly-label').textContent=kind==='env'?'Presupuesto semanal del sobre ($)':'Pago semanal planeado ($, puede ser 0)';
+  if(kind==='cat'){
+    document.getElementById('add-env').innerHTML='<option value="">Sin sobre (solo categoría)</option>'+S().envelopes.map(function(e){return '<option value="'+esc(e.id)+'">'+esc(e.name)+'</option>'}).join('');
+  }
+  setTimeout(function(){var a=document.activeElement;if(!a||a===document.body||a.tagName==='BUTTON')document.getElementById('add-name').focus()},50);
+}
+function closeAddPanel(){
+  addKind=null;
+  var p=document.getElementById('add-panel'); if(p) p.style.display='none';
+  document.querySelectorAll('#add-kinds .chip').forEach(function(b){b.setAttribute('aria-pressed','false')});
+}
+function renderCustomList(){
+  var el=document.getElementById('custom-list'); if(!el) return;
+  var s=S(), rows=[];
+  (s.customCats||[]).forEach(function(c,i){rows.push({k:'cat',i:i,label:c.name,sub:'Categoría'+(c.env?' · en '+((s.envelopes.filter(function(e){return e.id===c.env})[0]||{}).name||'sobre'):'')})});
+  s.envelopes.forEach(function(e,i){if(e.custom)rows.push({k:'env',i:i,label:e.name,sub:'Sobre'})});
+  s.debts.forEach(function(d,i){if(d.custom)rows.push({k:'debt',i:i,label:d.name,sub:'Deuda'})});
+  if(!rows.length){el.innerHTML='';return}
+  el.innerHTML='<div class="label" style="margin-top:0">Lo que agregaste</div>'+rows.map(function(r){
+    return '<div class="row" style="padding:8px 0"><span class="mid"><b>'+esc(r.label)+'</b><small>'+r.sub+'</small></span><button class="btn-danger" style="min-height:40px;padding:0 14px" data-rm="'+r.k+':'+r.i+'">Quitar</button></div>'}).join('');
+}
+function commitSettings(msg){
+  data.settingsTs=Date.now(); persist(); fillSettings(); render(); toast(msg); syncPending();
+}
+function addItem(){
+  var err=document.getElementById('add-err'), name=document.getElementById('add-name').value.replace(/\s+/g,' ').trim();
+  if(!name){err.textContent='Escribe un nombre.';return}
+  if(name.length>40){err.textContent='El nombre es muy largo (máximo 40 letras).';return}
+  var s=S();
+  snapshotFields();
+  if(addKind==='cat'){
+    if(allNames().indexOf(name.toLowerCase())>-1){err.textContent='Ya existe algo con ese nombre.';return}
+    var env=document.getElementById('add-env').value;
+    s.customCats=s.customCats||[]; s.customCats.push({name:name,env:env});
+    if(env){var e=s.envelopes.filter(function(x){return x.id===env})[0];if(e&&e.cats.indexOf(name)<0)e.cats.push(name)}
+    commitSettings('Categoría agregada: '+name);
+  }else if(addKind==='env'){
+    var w=parseAmount(document.getElementById('add-weekly').value);
+    if(isNaN(w)||w<0){err.textContent='Escribe el presupuesto semanal (0 si aún no lo sabes).';return}
+    if(allNames().indexOf(name.toLowerCase())>-1){err.textContent='Ya existe algo con ese nombre.';return}
+    s.envelopes.push({id:'c'+uid(),name:name,cats:[name],weekly:w,custom:true});
+    commitSettings('Sobre agregado: '+name);
+  }else if(addKind==='debt'){
+    var st=parseAmount(document.getElementById('add-start').value), wk=parseAmount(document.getElementById('add-weekly').value||'0');
+    if(isNaN(st)||st<=0){err.textContent='Escribe el saldo inicial de la deuda.';return}
+    if(isNaN(wk)||wk<0){err.textContent='Revisa el pago semanal.';return}
+    var cat='Deuda: '+name;
+    if(allNames().indexOf(name.toLowerCase())>-1||allNames().indexOf(cat.toLowerCase())>-1){err.textContent='Ya existe algo con ese nombre.';return}
+    s.debts.push({id:'c'+uid(),name:name,cat:cat,start:st,weekly:wk,custom:true});
+    commitSettings('Deuda agregada: '+name);
+  }
+}
+function removeItem(spec){
+  var p=spec.split(':'), k=p[0], i=+p[1], s=S(), err=document.getElementById('set-err');
+  snapshotFields();
+  if(k==='cat'){
+    var c=(s.customCats||[])[i]; if(!c) return;
+    if(usedCat(c.name)){err.textContent='No se puede quitar «'+c.name+'»: ya tiene movimientos registrados.';return}
+    s.customCats.splice(i,1);
+    s.envelopes.forEach(function(e){e.cats=e.cats.filter(function(x){return x!==c.name})});
+    commitSettings('Categoría quitada');
+  }else if(k==='env'){
+    var e=s.envelopes[i]; if(!e||!e.custom) return;
+    if(e.cats.some(usedCat)){err.textContent='No se puede quitar el sobre «'+e.name+'»: ya tiene movimientos registrados.';return}
+    s.envelopes.splice(i,1);
+    commitSettings('Sobre quitado');
+  }else if(k==='debt'){
+    var d=s.debts[i]; if(!d||!d.custom) return;
+    if(usedCat(d.cat)){err.textContent='No se puede quitar la deuda «'+d.name+'»: ya tiene pagos registrados.';return}
+    s.debts.splice(i,1);
+    commitSettings('Deuda quitada');
+  }
+}
+document.getElementById('add-kinds').addEventListener('click',function(e){var b=e.target.closest('[data-addkind]');if(b)openAddPanel(b.dataset.addkind)});
+document.getElementById('add-go').addEventListener('click',addItem);
+document.getElementById('add-cancel').addEventListener('click',closeAddPanel);
+document.getElementById('custom-list').addEventListener('click',function(e){var b=e.target.closest('[data-rm]');if(b)removeItem(b.dataset.rm)});
+
 function fillSettings(){
   document.getElementById('s-tope').value=S().tope;
   document.getElementById('s-env').innerHTML=S().envelopes.map(function(e,i){return '<label for="se'+i+'">'+esc(e.name)+'</label><input class="field" id="se'+i+'" inputmode="decimal" value="'+e.weekly+'">'}).join('');
   document.getElementById('s-debt').innerHTML=S().debts.map(function(d,i){return '<label for="sd'+i+'">'+esc(d.name.split(' (')[0])+'</label><input class="field" id="sd'+i+'" inputmode="decimal" value="'+d.start+'" aria-label="Saldo inicial de '+esc(d.name)+'"><input class="field" id="sw'+i+'" inputmode="decimal" value="'+d.weekly+'" aria-label="Pago semanal de '+esc(d.name)+'">'}).join('');
   document.getElementById('backup-box').style.display='none';
   document.getElementById('btn-restore-go').style.display='none';
+  renderCustomList(); closeAddPanel();
   var cfg=getCfg(); document.getElementById('s-url').value=cfg.url||''; document.getElementById('s-token').value=cfg.token||'';
   document.getElementById('set-err').textContent='';
   wipeArmed=false; document.getElementById('btn-wipe').textContent='Borrar todos los movimientos';
