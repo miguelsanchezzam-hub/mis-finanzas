@@ -116,6 +116,12 @@ h2{font-family:var(--display);font-weight:700;font-size:17px;margin:22px 0 10px}
 .tab svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .tab[aria-selected="true"]{color:var(--teal);font-weight:600}
 .tab .badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--chile);color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center}
+.total-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 4px 4px 16px;margin-bottom:12px;border-radius:16px;background:var(--surface);box-shadow:var(--shadow)}
+.total-bar .lbl{font-size:13px;color:var(--muted);display:block}
+.total-bar b{font-family:var(--display);font-size:20px;letter-spacing:-.01em}
+.total-bar b.neg{color:var(--chile)}
+.total-eye{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none}
+.total-eye svg{width:22px;height:22px;stroke:var(--muted);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .pay-meta{font-size:13px;color:var(--muted)}
 .pay-flag{color:var(--mari-ink);font-weight:600}
 .pay-late{color:var(--chile);font-weight:600}
@@ -522,6 +528,18 @@ function rowHTML(t){
 }
 function sortedTx(list){return list.slice().sort(function(a,b){return a.date<b.date?1:a.date>b.date?-1:(a.created<b.created?1:-1)})}
 
+var HIDE_KEY='registro-gastos-oculto';
+var hideTotal=false;
+try{hideTotal=window.localStorage.getItem(HIDE_KEY)==='1'}catch(e){}
+function totalCard(){
+  var inc=sum(data.tx.filter(function(t){return t.type==='ingreso'})), out=sum(data.tx.filter(function(t){return t.type==='gasto'}));
+  var bal=inc-out, neg=bal<0;
+  var eye=hideTotal
+    ?'<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>'
+    :'<svg viewBox="0 0 24 24"><path d="M17.9 17.9A10.9 10.9 0 0 1 12 19C5 19 1 12 1 12a18.5 18.5 0 0 1 5.1-5.9M9.9 4.2A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2M1 1l22 22"/></svg>';
+  return '<div class="total-bar"><span><span class="lbl">Total acumulado</span><b class="'+(!hideTotal&&neg?'neg':'')+'" aria-live="polite">'+(hideTotal?'$ ******':(neg?'−':'')+money(Math.abs(bal)))+'</b></span>'+
+    '<button class="total-eye" data-toggle-total="1" aria-label="'+(hideTotal?'Mostrar total acumulado':'Ocultar total acumulado')+'" aria-pressed="'+hideTotal+'">'+eye+'</button></div>';
+}
 function viewHoy(){
   var td=todayISO(), tx=data.tx;
   var todaySpent=sum(tx.filter(function(t){return t.date===td&&t.type==='gasto'}));
@@ -538,7 +556,7 @@ function viewHoy(){
   var left=inc-out;
   var dayName=fmtDay(td,{weekday:'long',day:'numeric',month:'long'});
   var recent=sortedTx(tx).slice(0,5);
-  var h='<div class="card hero"><p class="day">'+esc(dayName)+'</p>'+
+  var h=totalCard()+'<div class="card hero"><p class="day">'+esc(dayName)+'</p>'+
     '<p class="big">'+money(todaySpent)+'</p><p class="sub">gastado hoy</p>'+
     (tope>0?'<div class="meter-head"><strong>Antojos</strong><span>'+money(ant)+' de '+money(tope)+'</span></div>'+
     '<div class="bar '+cls+'" role="img" aria-label="Antojos de hoy: '+money(ant)+' de '+money(tope)+'"><i style="width:'+Math.min(100,r*100)+'%"></i></div>'+hint:'')+
@@ -884,6 +902,7 @@ document.getElementById('view').addEventListener('click',function(e){
   }
   if((t=e.target.closest('[data-row]'))){openRow=openRow===t.dataset.row?null:t.dataset.row;render();return}
   if((t=e.target.closest('[data-week]'))){var n=weekOffset+ +t.dataset.week;if(n<=0){weekOffset=n;render()}return}
+  if((t=e.target.closest('[data-toggle-total]'))){hideTotal=!hideTotal;try{window.localStorage.setItem(HIDE_KEY,hideTotal?'1':'0')}catch(x){}render();return}
   if((t=e.target.closest('[data-payrow]'))){openPay=openPay===t.dataset.payrow?null:t.dataset.payrow;render();return}
   if((t=e.target.closest('[data-pay-reg]'))){startPayEntry(t.dataset.payReg);return}
   if((t=e.target.closest('[data-pay-edit]'))){openPayEdit(t.dataset.payEdit);return}
